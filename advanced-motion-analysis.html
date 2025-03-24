@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>動作分析アプリ</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 10px;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            font-size: 1.5rem;
+        }
+        
+        .video-container {
+            position: relative;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+        
+        video, canvas {
+            width: 100%;
+            border: 1px solid #ddd;
+            background-color: #f0f0f0;
+        }
+        
+        canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+        }
+        
+        .controls {
+            margin: 15px 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        
+        button {
+            padding: 8px 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+        
+        button:hover {
+            background-color: #45a049;
+        }
+        
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        .file-input {
+            margin: 10px 0;
+            width: 100%;
+        }
+        
+        .analysis-tools {
+            margin-top: 15px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .tool-button {
+            margin-right: 5px;
+            margin-bottom: 5px;
+        }
+        
+        .measurements {
+            margin-top: 15px;
+        }
+        
+        /* スマホ向け調整 */
+        @media (max-width: 768px) {
+            button {
+                padding: 10px;
+                font-size: 0.8rem;
+                flex-grow: 1;
+            }
+            
+            .controls {
+                justify-content: center;
+            }
+            
+            h1 {
+                font-size: 1.3rem;
+            }
+        }
+        
+        .playback-controls {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+        }
+        
+        .playback-controls input {
+            flex-grow: 1;
+            margin: 0 10px;
+        }
+        
+        .info-text {
+            margin: 10px 0;
+            color: #666;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>動作分析アプリ</h1>
+    
+    <div class="info-text">
+        カメラを使うか、録画済み映像をアップロードして分析できます。
+    </div>
+    
+    <div class="file-input">
+        <label for="videoFile">録画済み映像を選択:</label>
+        <input type="file" id="videoFile" accept="video/*">
+    </div>
+    
+    <div class="video-container">
+        <video id="video" controls></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <div class="playback-controls">
+        <button id="playPause">再生/一時停止</button>
+        <input type="range" id="seekBar" min="0" max="100" value="0">
+        <span id="currentTime">00:00</span> / <span id="duration">00:00</span>
+    </div>
+    
+    <div class="controls">
+        <button id="startCamera">カメラ開始</button>
+        <button id="captureImage">画像キャプチャ</button>
+        <button id="startRecording" disabled>録画開始</button>
+        <button id="stopRecording" disabled>録画停止</button>
+        <button id="downloadRecording" disabled>録画保存</button>
+    </div>
+    
+    <div class="analysis-tools">
+        <h3>分析ツール</h3>
+        <div class="controls">
+            <button id="measureAngle" class="tool-button">角度測定</button>
+            <button id="measureDistance" class="tool-button">距離測定</button>
+            <button id="clearCanvas" class="tool-button">クリア</button>
+        </div>
+        
+        <div class="measurements">
+            <p id="angleResult"></p>
+            <p id="distanceResult"></p>
+        </div>
+    </div>
+    
+    <script>
+        // 変数定義
+        let video = document.getElementById('video');
+        let canvas = document.getElementById('canvas');
+        let ctx = canvas.getContext('2d');
+        let mediaRecorder;
+        let recordedChunks = [];
+        let recordedVideo = null;
+        let isRecording = false;
+        let currentTool = null;
+        let points = [];
+        let stream = null;
+        
+        // シークバーと時間表示
+        const seekBar = document.getElementById('seekBar');
+        const currentTimeDisplay = document.getElementById('currentTime');
+        const durationDisplay = document.getElementById('duration');
+        const playPauseButton = document.getElementById('playPause');
+        
+        // ファイルアップロード
+        document.getElementById('videoFile').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                // カメラを停止
+                stopCamera();
+                
+                // ファイルをビデオにセット
+                const fileURL = URL.createObjectURL(file);
+                video.src = fileURL;
+                
+                // 前回の計測をクリア
+                clearCanvas();
+                
+                // ビデオがロードされたらキャンバスサイズを調整
+                video.onloadedmetadata = () => {
+                    resizeCanvas();
+                };
+            }
+        });
+        
+        // 再生/一時停止ボタン
+        playPauseButton.addEventListener('click', () => {
+            if (video.paused) {
+                video.play();
+            } else {
+                video.pause();
+            }
+        });
+        
+        // ビデオの時間更新イベント
+        video.addEventListener('timeupdate', () => {
+            // シークバーを更新
+            if (video.duration) {
+                seekBar.value = (video.currentTime / video.duration) * 100;
+                currentTimeDisplay.textContent = formatTime(video.currentTime);
+            }
+        });
+        
+        // ビデオのロード完了イベント
+        video.addEventListener('loadedmetadata', () => {
+            durationDisplay.textContent = formatTime(video.duration);
+        });
+        
+        // シークバーの変更イベント
+        seekBar.addEventListener('input', () => {
+            const seekTime = video.duration * (seekBar.value / 100);
+            video.currentTime = seekTime;
+        });
+        
+        // 時間のフォーマット（MM:SS）
+        function formatTime(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            seconds = Math.floor(seconds % 60);
+            return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+        
+        // キャンバスのリサイズ
+        function resizeCanvas() {
+            // ビデオの実際のサイズを取得
+            const videoWidth = video.videoWidth || video.clientWidth;
+            const videoHeight = video.videoHeight || video.clientHeight;
+            
+            // キャンバスのサイズをビデオに合わせる
+            canvas.width = videoWidth;
+            canvas.height = videoHeight;
+            
+            // ビデオコンテナの高さを設定
+            const aspectRatio = videoHeight / videoWidth;
+            const containerWidth = video.clientWidth;
+            const containerHeight = containerWidth * aspectRatio;
+            
+            // スタイルでキャンバスをビデオに重ねる
+            canvas.style.height = `${video.clientHeight}px`;
+        }
+        
+        // カメラの停止
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            if (video.srcObject) {
+                video.srcObject = null;
+            }
+            
+            // 録画関連ボタンを無効化
+            document.getElementById('startRecording').disabled = true;
+            document.getElementById('stopRecording').disabled = true;
+        }
+        
+        // カメラボタン
+        document.getElementById('startCamera').addEventListener('click', async () => {
+            try {
+                // 既存のカメラを停止
+                stopCamera();
+                
+                // ファイル入力をリセット
+                document.getElementById('videoFile').value = '';
+                
+                // 新しいカメラストリームを取得
+                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.play();
+                
+                // キャンバスをクリア
+                clearCanvas();
+                
+                // キャンバスサイズをビデオに合わせる
+                video.onloadedmetadata = () => {
+                    resizeCanvas();
+                    
+                    // 録画ボタンを有効化
+                    document.getElementById('startRecording').disabled = false;
+                };
+                
+                // MediaRecorderの設定
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        recordedChunks.push(e.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                    recordedVideo = URL.createObjectURL(blob);
+                    recordedChunks = [];
+                    document.getElementById('downloadRecording').disabled = false;
+                };
+                
+            } catch (error) {
+                console.error("カメラアクセスエラー:", error);
+                alert("カメラへのアクセスに失敗しました。");
+            }
+        });
+        
+        // 映像キャプチャ
+        document.getElementById('captureImage').addEventListener('click', () => {
+            if (video.videoWidth === 0 || video.videoHeight === 0) {
+                alert("映像が読み込まれていません。");
+                return;
+            }
+            
+            // キャンバスサイズを確認・調整
+            if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                resizeCanvas();
+            }
+            
+            // 現在の映像をキャプチャ
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        });
+        
+        // 録画開始
+        document.getElementById('startRecording').addEventListener('click', () => {
+            if (!mediaRecorder || !stream) {
+                alert("カメラが起動していません。");
+                return;
+            }
+            
+            recordedChunks = [];
+            mediaRecorder.start();
+            isRecording = true;
+            document.getElementById('startRecording').disabled = true;
+            document.getElementById('stopRecording').disabled = false;
+        });
+        
+        // 録画停止
+        document.getElementById('stopRecording').addEventListener('click', () => {
+            if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                isRecording = false;
+                document.getElementById('startRecording').disabled = false;
+                document.getElementById('stopRecording').disabled = true;
+            }
+        });
+        
+        // 録画ダウンロード
+        document.getElementById('downloadRecording').addEventListener('click', () => {
+            if (recordedVideo) {
+                const a = document.createElement('a');
+                a.href = recordedVideo;
+                a.download = `recording-${new Date().toISOString()}.webm`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            }
+        });
+        
+        // 角度測定ツール
+        document.getElementById('measureAngle').addEventListener('click', () => {
+            currentTool = 'angle';
+            points = [];
+        });
+        
+        // 距離測定ツール
+        document.getElementById('measureDistance').addEventListener('click', () => {
+            currentTool = 'distance';
+            points = [];
+        });
+        
+        // キャンバスクリア
+        function clearCanvas() {
+            if (canvas.width > 0 && canvas.height > 0) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+            points = [];
+            document.getElementById('angleResult').textContent = '';
+            document.getElementById('distanceResult').textContent = '';
+        }
+        
+        document.getElementById('clearCanvas').addEventListener('click', clearCanvas);
+        
+        // キャンバス上でのクリックイベント
+        canvas.addEventListener('click', (e) => {
+            if (!currentTool) return;
+            
+            // キャンバスのサイズを確認
+            if (canvas.width === 0 || canvas.height === 0) {
+                alert("映像が表示されていません。");
+                return;
+            }
+            
+            // クリック位置を取得（スマホ対応）
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            let x, y;
+            
+            // タッチイベントかマウスイベントかを判定
+            if (e.touches) { // タッチイベント
+                x = (e.touches[0].clientX - rect.left) * scaleX;
+                y = (e.touches[0].clientY - rect.top) * scaleY;
+            } else { // マウスイベント
+                x = (e.clientX - rect.left) * scaleX;
+                y = (e.clientY - rect.top) * scaleY;
+            }
+            
+            // ポイントを追加
+            points.push({x, y});
+            
+            // ポイントを描画
+            ctx.fillStyle = 'red';
+            ctx.beginPath();
+            ctx.arc(x, y, 5, 0, 2 * Math.PI);
+            ctx.fill();
+            
+            // 測定ツールに応じた処理
+            if (currentTool === 'angle' && points.length === 3) {
+                // 3点で角度を計算
+                const angle = calculateAngle(points[0], points[1], points[2]);
+                document.getElementById('angleResult').textContent = `角度: ${angle.toFixed(2)}°`;
+                
+                // 線を描画
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+                ctx.lineTo(points[1].x, points[1].y);
+                ctx.lineTo(points[2].x, points[2].y);
+                ctx.stroke();
+                
+                // リセット
+                points = [];
+                currentTool = null;
+            } else if (currentTool === 'distance' && points.length === 2) {
+                // 2点間の距離を計算
+                const distance = calculateDistance(points[0], points[1]);
+                document.getElementById('distanceResult').textContent = `距離: ${distance.toFixed(2)}ピクセル`;
+                
+                // 線を描画
+                ctx.strokeStyle = 'green';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+                ctx.lineTo(points[1].x, points[1].y);
+                ctx.stroke();
+                
+                // リセット
+                points = [];
+                currentTool = null;
+            }
+        });
+        
+        // タッチイベント（スマホ対応）
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault(); // デフォルトの動作を防止
+            
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent('click', {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            canvas.dispatchEvent(mouseEvent);
+        }, false);
+        
+        // 角度計算関数
+        function calculateAngle(p1, p2, p3) {
+            const vector1 = {
+                x: p1.x - p2.x,
+                y: p1.y - p2.y
+            };
+            
+            const vector2 = {
+                x: p3.x - p2.x,
+                y: p3.y - p2.y
+            };
+            
+            const dotProduct = vector1.x * vector2.x + vector1.y * vector2.y;
+            const magnitude1 = Math.sqrt(vector1.x * vector1.x + vector1.y * vector1.y);
+            const magnitude2 = Math.sqrt(vector2.x * vector2.x + vector2.y * vector2.y);
+            
+            const angleRad = Math.acos(dotProduct / (magnitude1 * magnitude2));
+            return angleRad * (180 / Math.PI);
+        }
+        
+        // 距離計算関数
+        function calculateDistance(p1, p2) {
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+        
+        // ウィンドウのリサイズイベント
+        window.addEventListener('resize', () => {
+            if (video.videoWidth > 0) {
+                resizeCanvas();
+            }
+        });
+        
+        // 初期化
+        video.addEventListener('play', () => {
+            if (canvas.width === 0 || canvas.height === 0) {
+                resizeCanvas();
+            }
+        });
+    </script>
+</body>
+</html>
